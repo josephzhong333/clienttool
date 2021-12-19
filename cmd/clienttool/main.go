@@ -6,7 +6,7 @@ import (
 	"os"
 	"strings"
 
-	valid "github.com/asaskevich/govalidator"
+	valid "github.com/dchest/validator"
 	worker "github.com/josephzhong333/clienttool/pkg"
 )
 
@@ -21,7 +21,7 @@ func main() {
 	if !flag.Parsed() {
 		flag.Parse()
 	}
-	if !valid.IsDNSName(name) {
+	if !valid.IsValidDomain(name) {
 		fmt.Println("Please input correct domain name")
 		usage()
 		os.Exit(-1)

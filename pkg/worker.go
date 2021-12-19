@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"os"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -15,9 +15,11 @@ import (
 const (
 	RetryTimes   = 3
 	Timeout      = 50
-	Completed    = 1
-	Abort        = -1
 	RequestCount = 100
+
+	QueryIPFailed = -2
+	Completed     = 0
+	Abort         = -5
 )
 
 type (
@@ -30,6 +32,12 @@ type (
 		*zap.SugaredLogger
 		IPs []string
 		Cfg Config
+		Ac  ActiveConnection
+	}
+
+	ActiveConnection struct {
+		ActiveConnectionCount []int
+		Locker                sync.Mutex
 	}
 )
 
@@ -46,6 +54,8 @@ func NewWorker(config Config) *Worker {
 		l = l.WithOptions(zap.IncreaseLevel(zapcore.ErrorLevel))
 	case "debug":
 		l = l.WithOptions(zap.IncreaseLevel(zapcore.DebugLevel))
+	default:
+		l = l.WithOptions(zap.IncreaseLevel(zapcore.InfoLevel))
 	}
 	w := &Worker{
 		IPs: []string{},
@@ -55,7 +65,7 @@ func NewWorker(config Config) *Worker {
 	return w
 }
 
-// the process is composed of 6 phases:
+// Run the process is composed of 6 phases:
 // 1, get IPs of target domain name
 // 2, create corresponding goroutine and channel for each IP
 // 3, start a load balance goroutine to distribute request to each IP processing channel
@@ -63,12 +73,12 @@ func NewWorker(config Config) *Worker {
 // send the failed request id back to request channel
 // 5, load balance channel distribute the failed request again
 // 6, if all the request completed(completed count>=100), the entire process completed
-func (w *Worker) Run() {
+func (w *Worker) Run() int {
 	start := time.Now().UnixNano() / 1e6
 	ips, e := w.GetIPs(w.Cfg.Name)
 	if e != nil {
-		w.Error("after retry, still failed to get the IPs of target domain name.Please check the input domain name or try again later.")
-		os.Exit(-1)
+		w.Errorf("after retry, still failed to get the IPs of target domain name:\"%s\", Please check the input domain name or try again later.", w.Cfg.Name)
+		return QueryIPFailed
 	} else {
 		for _, v := range ips {
 			w.IPs = append(w.IPs, v)
@@ -79,28 +89,68 @@ func (w *Worker) Run() {
 
 	startTime := time.Now().UnixNano() / 1e6
 
+	IPCount := len(ips)
 	reqChan := make(chan int, RequestCount)
-	processingChan := make([]chan int, len(ips))
+	processingChan := make([]chan int, IPCount)
 	finishChan := make(chan int, RequestCount)
+	ac := ActiveConnection{
+		ActiveConnectionCount: []int{},
+	}
+	acc := ac.ActiveConnectionCount
+	for index := 0; index < IPCount; index++ {
+		acc = append(acc, 0)
+	}
+	ac.ActiveConnectionCount = acc
+	w.Ac = ac
 	for i, ip := range ips {
 		processingChan[i] = make(chan int, RequestCount)
-		go w.StartGoroutine(ip, processingChan[i], finishChan, reqChan)
+		go w.StartGoroutine(i, ip, processingChan[i], finishChan, reqChan)
 	}
+
+	w.Debugf("init %d goroutine and channel consumed time:%dms", IPCount, time.Now().UnixNano()/1e6-startTime)
+
+	// load balance scheduler goroutine
+	// the least active connections first algorithm
 	go func() {
 		for i := 1; i <= RequestCount; i++ {
 			reqChan <- i
 		}
-		x := 0
 		for {
 			select {
 			case c := <-reqChan:
-				index := (x) % len(ips)
-				x++
-				processingChan[index] <- c
+				w.Ac.Locker.Lock()
+				acCopy := make([]int, IPCount)
+				w.Debugf("in lb goroutine, w.Ac.ActiveConnectionCount for each IP:%v", w.Ac.ActiveConnectionCount)
+				copy(acCopy, w.Ac.ActiveConnectionCount)
+				w.Ac.Locker.Unlock()
+
+				min := RequestCount
+				var minIndex []int
+				for i, v := range acCopy {
+					w.Debugf("goroutine:%d has %d active connections", i, v)
+					if v < min {
+						min = v
+						minIndex = []int{}
+						minIndex = append(minIndex, i)
+					} else if v == min {
+						minIndex = append(minIndex, i)
+					}
+				}
+
+				minIndexLength := len(minIndex)
+				if minIndexLength == 1 {
+					w.Debugf("the least active connections is number %v goroutine, %d active connections remaining", minIndex, min)
+					processingChan[minIndex[0]] <- c
+				} else if minIndexLength == 0 {
+					w.Debugf("no active connection count collected yet, simply distribute request by mod operation")
+					processingChan[c%IPCount] <- c
+				} else if minIndexLength > 0 {
+					w.Debugf("the least active connections is number %v goroutine, they each have %d active connections remaining", minIndex, min)
+					processingChan[minIndex[c%len(minIndex)]] <- c
+				}
 			}
 		}
 	}()
-	w.Debugf("init goroutine and channel consumed time:%dms", time.Now().UnixNano()/1e6-startTime)
 
 	resultTag := Abort
 	timeoutTimer := time.NewTimer(Timeout * time.Second)
@@ -129,8 +179,10 @@ EndInfo:
 	} else {
 		w.Errorf("please check target domain is accessible or try again later")
 	}
+	return resultTag
 }
 
+// GetIPs
 // Get IPs of target domain by using golang library net.LookupHost
 func (w *Worker) GetIPs(name string) ([]string, error) {
 	var ips []string
@@ -151,7 +203,7 @@ func (w *Worker) GetIPs(name string) ([]string, error) {
 			ips2 = append(ips2, v)
 		}
 	}
-	w.Debugf("IPs exclude IPv6:%v", ips2)
+	w.Debugf("query domain name:%s, got result: IPs exclude IPv6:%v", name, ips2)
 	if len(ips2) == 0 {
 		return nil, errors.New("ip not found")
 	} else {
@@ -159,24 +211,28 @@ func (w *Worker) GetIPs(name string) ([]string, error) {
 	}
 }
 
-// start a dedicated goroutine for the backend I, to handle the request distributed to this IP
-func (w *Worker) StartGoroutine(ip string, receiveCh chan int, finishCh chan int, requestCh chan int) {
+// StartGoroutine start a dedicated goroutine for the backend IP, to handle the request distributed to this IP
+func (w *Worker) StartGoroutine(index int, ip string, receiveCh chan int, finishCh chan int, requestCh chan int) {
 	c := &http.Client{
 		Transport: &http.Transport{
 			MaxIdleConnsPerHost: 10,
 			MaxConnsPerHost:     100,
 			DialContext: (&net.Dialer{
-				Timeout:   1500 * time.Millisecond,
+				Timeout:   3 * time.Second,
 				KeepAlive: 30 * time.Second,
 			}).DialContext,
 		},
-		Timeout: time.Duration(2) * time.Second,
+		Timeout: time.Duration(3) * time.Second,
 	}
 	for {
 		select {
 		case n := <-receiveCh:
 			w.Debugf("IP:%s, received request:%d", ip, n)
 			go func(x int) {
+				w.Ac.Locker.Lock()
+				w.Debugf("w.Ac.ActiveConnectionCount[%d] is %d", index, w.Ac.ActiveConnectionCount[index])
+				w.Ac.ActiveConnectionCount[index]++
+				w.Ac.Locker.Unlock()
 				req, e := http.NewRequest("Get", fmt.Sprintf("http://%s", ip), nil)
 				req.Host = w.Cfg.Name
 				if e != nil {
@@ -194,6 +250,9 @@ func (w *Worker) StartGoroutine(ip string, receiveCh chan int, finishCh chan int
 					defer resp.Body.Close()
 					finishCh <- x
 				}
+				w.Ac.Locker.Lock()
+				w.Ac.ActiveConnectionCount[index]--
+				w.Ac.Locker.Unlock()
 			}(n)
 		}
 	}
