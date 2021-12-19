@@ -24,7 +24,7 @@ Example: ./clienttool --name www.baidu.com --log debug
 --name: Specify the name of the target domain name
 --log: Specify the log level. Only three levels supported: info, debug, error. If not specified, use debug level info as default
 ```
-Please note ""--name" option with tartet domain name is mandatory, "--log" is optional.
+Please note ""--name" option with target domain name is mandatory, "--log" is optional.
 
 "--log debug" show verbose log to show the detail processing logic, meanwhile may degrade performance 
 
