@@ -47,11 +47,11 @@ the process is composed of 6 phases:
 
 4, each IP goroutine listen to itself receive channel. start one goroutine for each request. For example, if IP1 goroutine got 20 requests from channel, it will start 20 goroutine to send http request cocurrently.
 
-if timeout or status code >500, the http request goroutine will send the failed request id back to request channel
+if timeout or status code >500, the goroutine will send the failed request id back to request channel
 
-5, load balance channel distribute the failed request again
+5, load balance goroutine distribute the failed request again
 
-6, if all the request completed(completed count>=100), or the timeout time elapsed. the entire process completed
+6, if all the request completed(completed request count>=100), or the specified timeout time elapsed. the entire process completed
 
 ## Load balance algorithm
 
@@ -65,7 +65,7 @@ Key advantage:
 
 For example, 3 backend IPs, if one IP always timeout or high latency, marked as IP A.  So IP A will accumulate connection so it's active connections will be high. The LAC algorithm will schedule requests to other backend IPs  
 
-3, The failed request will be resubmit back to the request channel. Load balance algorithm will also choose a workload-low backend to handle the request.  Mostly, the failed request will not distribute the ill backend IP again. It reduces the entire request job latency
+3, The failed request will be resubmit back to the request channel. Load balance algorithm will also choose a workload-low backend to handle the request.  Mostly, the failed request will not distribute to the ill backend IP again. It reduces the entire request job latency
 
 
 
