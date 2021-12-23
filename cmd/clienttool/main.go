@@ -49,7 +49,7 @@ Example: ./clienttool --name www.ebay.com
 Example: ./clienttool --name www.baidu.com --log debug
 
 --name: Specify the name of the target domain name
---log: Specify the log level. Only three levels supported: info, debug, error. If not specified, use debug level info as default
+--log: Specify the log level. Only three levels supported: info, debug, error. If not specified, use log level info as default
 
 `)
 }
